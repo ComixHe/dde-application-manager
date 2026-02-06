@@ -13,7 +13,7 @@
 Q_LOGGING_CATEGORY(logDesktopFileParser, "am.desktopfileparser")
 
 namespace {
-bool isInvalidLocaleString(const QString &str) noexcept
+bool isInvalidLocaleString(QStringView str) noexcept
 {
     // example: https://regex101.com/r/hylOay/2
     static const auto _re = [] {
@@ -28,13 +28,16 @@ bool isInvalidLocaleString(const QString &str) noexcept
     }();
     const auto re = _re;
 
-    return re.match(str).hasMatch();
+    return re.matchView(str).hasMatch();
 }
 
-bool isLocaleString(const QString &key) noexcept
+bool isLocaleString(QStringView key) noexcept
 {
-    static const QSet<QString> localeSet{"Name", "GenericName", "Comment", "Keywords"};
-    return localeSet.contains(key);
+    using namespace Qt::StringLiterals;
+    return (key == u"Name"_s ||
+            key == u"GenericName"_s ||
+            key == u"Comment"_s ||
+            key == u"Keywords"_s);
 }
 
 }  // namespace
@@ -111,48 +114,50 @@ ParserError DesktopFileParser::addGroup(Groups &ret) noexcept
 
 ParserError DesktopFileParser::addEntry(typename Groups::iterator &group) noexcept
 {
-    auto line = m_line;
+    auto line = std::move(m_line);
     m_line.clear();
-    auto splitCharIndex = line.indexOf('=');
+    const auto lineView = QStringView{line};
+
+    auto splitCharIndex = lineView.indexOf(u'=');
     if (splitCharIndex == -1) {
         qCDebug(logDesktopFileParser) << "invalid line in desktop file, skip it:" << line;
         return ParserError::NoError;
     }
-    auto keyStr = line.first(splitCharIndex).trimmed();
-    auto valueStr = line.sliced(splitCharIndex + 1).trimmed();
 
-    QString key{""};
-    QString localeStr{DesktopFileDefaultKeyLocale};
+    auto keyFullView = lineView.first(splitCharIndex).trimmed();
+    auto valueView = lineView.sliced(splitCharIndex + 1).trimmed();
+
     // NOTE:
     // We are process "localized keys" here, for usage check:
     // https://specifications.freedesktop.org/desktop-entry-spec/desktop-entry-spec-latest.html#localized-keys
-    const qsizetype localeBegin = keyStr.indexOf('[');
-    const qsizetype localeEnd = keyStr.lastIndexOf(']');
-    if ((localeBegin == -1 && localeEnd != -1) || (localeBegin != -1 && localeEnd == -1)) {
+    const auto localeBegin = keyFullView.indexOf(u'[');
+    const auto localeEnd = keyFullView.lastIndexOf(u']');
+    if ((localeBegin == -1) != (localeEnd == -1)) {
         qCDebug(logDesktopFileParser) << "unmatched [] detected in desktop file, skip this line: " << line;
         return ParserError::NoError;
     }
 
-    if (localeBegin == -1 && localeEnd == -1) {
-        key = keyStr;
-    } else {
-        key = keyStr.sliced(0, localeBegin);
-        localeStr = keyStr.sliced(localeBegin + 1, localeEnd - localeBegin - 1);  // strip '[' and ']'
-    }
+    const auto keyView = (localeBegin == -1) ? keyFullView : keyFullView.first(localeBegin);
+    const auto localeView =
+        (localeBegin == -1) ? QStringView() : keyFullView.sliced(localeBegin + 1, localeEnd - localeBegin - 1);
 
     static const auto _re = [] {
-        QRegularExpression tmp{QStringLiteral(R"([^A-Za-z0-9-])")};
+        using namespace Qt::StringLiterals;
+        QRegularExpression tmp{uR"([^A-Za-z0-9-])"_s};
         tmp.optimize();
         return tmp;
     }();
     // NOTE: https://stackoverflow.com/a/25583104
     const auto re = _re;
-    if (re.match(key).hasMatch()) {
-        qCDebug(logDesktopFileParser) << "invalid key name:" << key << ", skip this line:" << line;
+    if (re.matchView(keyView).hasMatch()) {
+        qCDebug(logDesktopFileParser) << "invalid key name:" << keyView << ", skip this line:" << lineView;
         return ParserError::NoError;
     }
 
-    if (localeStr != DesktopFileDefaultKeyLocale and !isInvalidLocaleString(localeStr)) {
+    const auto key = keyView.toString();
+    const auto localeStr = localeView.isEmpty() ? DesktopFileDefaultKeyLocale : localeView.toString();
+
+    if (localeStr != DesktopFileDefaultKeyLocale && !isInvalidLocaleString(localeStr)) {
         qCDebug(logDesktopFileParser).noquote() << QString("invalid LOCALE (%2) for key \"%1\"").arg(key, localeStr);
         return ParserError::NoError;
     }
@@ -163,24 +168,22 @@ ParserError DesktopFileParser::addEntry(typename Groups::iterator &group) noexce
             return ParserError::NoError;
         }
 
-        if (!keyIt->canConvert<QStringMap>()) {
-            qCDebug(logDesktopFileParser) << "underlying type of value is invalid, raw value:" << *keyIt << "skip";
-            return ParserError::NoError;
-        }
+        if (keyIt->canConvert<QStringMap>()) {
+            auto localeMap = keyIt->value<QStringMap>();
+            auto it = localeMap.lowerBound(localeStr);
+            if (it != localeMap.end() && it.key() == localeStr) {
+                qCDebug(logDesktopFileParser) << "duplicate locale key:" << key;
+                return ParserError::NoError;
+            }
 
-        auto localeMap = keyIt->value<QStringMap>();
-        if (localeMap.contains(localeStr)) {
-            qCDebug(logDesktopFileParser) << "duplicate locale key:" << key << "skip.";
-            return ParserError::NoError;
+            localeMap.insert(it, localeStr, valueView.toString());
+            keyIt.value() = QVariant::fromValue(std::move(localeMap));
         }
-
-        localeMap.insert(localeStr, valueStr);
-        group->insert(key, QVariant::fromValue(localeMap));
     } else {
         if (isLocaleString(key)) {
-            group->insert(key, QVariant::fromValue(QStringMap{{localeStr, valueStr}}));
+            group->insert(key, QVariant::fromValue(QStringMap{{localeStr, valueView.toString()}}));
         } else {
-            group->insert(key, QVariant::fromValue(valueStr));
+            group->insert(key, QVariant::fromValue(valueView.toString()));
         }
     }
 
