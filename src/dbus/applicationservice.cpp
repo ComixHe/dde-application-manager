@@ -560,7 +560,6 @@ QDBusObjectPath ApplicationService::Launch(const QString &action, const QStringL
                     formattedRes.append(value.value<QString>());
                 }
 
-                auto newLoc = task.argNum;
                 if (task.local) {
                     for (auto it = formattedRes.begin(); it != formattedRes.end();) {
                         const QUrl url{*it};
@@ -571,8 +570,10 @@ QDBusObjectPath ApplicationService::Launch(const QString &action, const QStringL
                             shouldErase = true;
                         } else {
                             const auto scheme = url.scheme();
-                            if (scheme == "file" || scheme.isEmpty()) {
+                            if (scheme == "file") {
                                 *it = url.toLocalFile();
+                            } else if (scheme.isEmpty()) {
+                                // nothing to do
                             } else {
                                 // TODO: Remote file handling logic
                                 qWarning() << "Remote file not supported yet, skipping:" << *it;
@@ -582,8 +583,8 @@ QDBusObjectPath ApplicationService::Launch(const QString &action, const QStringL
 
                         if (shouldErase) {
                             auto curLoc = std::distance(formattedRes.begin(), it);
-                            if (curLoc < newLoc) {
-                                --newLoc;
+                            if (curLoc < task.argNum) {
+                                --task.argNum;
                             }
                             it = formattedRes.erase(it);
                         } else {
@@ -591,8 +592,6 @@ QDBusObjectPath ApplicationService::Launch(const QString &action, const QStringL
                         }
                     }
                 }
-
-                task.argNum = newLoc;
             }
 
             int originalIndex{0};
